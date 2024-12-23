@@ -1,0 +1,11 @@
+{
+	"delta": "io.delta:delta-spark_2.12:3.2.1",
+	"storage": "C:/Users/i.yurasov/Desktop/dev/_tmp/delta",
+	"tmp": "C:/tmp",
+	"tables": {
+		"bimcloud25": {
+			"name": "bimcloud25",
+			"schema": "bimcloud"
+		}
+	}
+}
