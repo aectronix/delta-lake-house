@@ -1,4 +1,10 @@
 {
+  "server": {
+    "url": "http://tw.qwerty.com",
+    "client": "qwerty.com",
+    "version": 25,
+    "port": 25000
+  },
   "fields": [
     {
       "name": "_id",

@@ -1,110 +1,89 @@
-import datetime
+import argparse
+import importlib
+import inspect
 import json
 import os
-import uuid
-from delta import *
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import current_timestamp
-from pyspark.sql.functions import col, desc, row_number
-from pyspark.sql.types import StructType
-from pyspark.sql.window import Window
 
-class Config:
+from typing import Optional, Dict, Any
 
-	_instance = None
+class LakeHouse():
 
-	def __new__(cls, filename='general.json'):
-		if cls._instance is None:
-			cls._instance = super(Config, cls).__new__(cls)
-			cls._instance._load(filename)
-		return cls._instance
+	def __init__(self):
 
-	def __getattr__(self, name):
-		if name in self._settings.__dict__:
-			return self._settings.__dict__[name]
-		raise AttributeError(f"'Config' object has no attribute '{name}'")
+		self.conf = self._load_config()
+		self.scripts = self._get_scripts()
 
-	def _load(self, filename):
-		path = os.path.join(os.path.dirname(__file__), 'settings/'+filename)
+	def _load_config(self, filename='general', scope='config', toObject=True):
+		""" Load & process configuration files
+		"""
+		path = os.path.join(os.path.dirname(__file__), f"{scope}\\{filename}.json")
 		if not os.path.exists(path):
 			raise FileNotFoundError(f"Configuration file not found: {path}")
 		with open(path, 'r') as file:
-			self._settings = json.load(file)
-		self._settings = self._to_obj(self._settings)
+			config = json.load(file)
+		return config
 
-	def _to_obj(self, dictionary):
-		if not isinstance(dictionary, dict):
-			return dictionary
-		return type('ConfigObject', (object,), {k: self._to_obj(v) for k, v in dictionary.items()})
+	def _get_scripts(self):
+		"""
+			Get and register existing scripts.
+		"""
+		modules = {}
+		scripts_dir = os.path.join(os.path.dirname(__file__), 'scripts')
 
+		if not os.path.exists(scripts_dir):
+			raise FileNotFoundError(f"Scripts folder not found: {scripts_dir}")
 
-class Worker():
+		for folder in os.listdir(scripts_dir):
+			folder_path = os.path.join(scripts_dir, folder)
+			if not os.path.isdir(folder_path):
+				continue
+			for file in os.listdir(folder_path):
+				if file.endswith('.py') and not file.startswith('__'):
+					module_name = f"scripts.{folder}.{file[:-3]}"
+					try:
+						module = importlib.import_module(module_name)
+						modules[file[:-3]] = module  # Store module itself
+					except Exception as e:
+						print(f"Failed to import {module_name}: {e}")
 
-	def __init__(self):
-		self.spark = SparkSession.builder \
-			.appName("arm_delta") \
-			.config("spark.jars.packages", Config().delta) \
-			.config("spark.driver.cleanupOnShutdown", "false") \
-			.config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-			.config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
-			.getOrCreate()
-	    # pass
+		return modules
 
-	def load_schema(self, filename):
-		path = os.path.join(os.path.dirname(__file__), 'schema/'+filename+'.json')
-		if not os.path.exists(path):
-			raise FileNotFoundError(f"Schema file not found: {path}")
-		with open(path, 'r') as file:
-			schema = json.load(file)
-			fields = schema['fields']
-			track = schema['track']
-		return (StructType.fromJson({"type": "struct", "fields": fields}), track)
+	def execute(self, script: str, function: Optional[str] = 'execute', **parameters: Dict[str, Any]):
+		"""
+			Run a specific function from the script, pickups related configs.
+			Args:
+				script (str): The name of the script (module) to run.
+				function (str): The specific function to execute (optional).
+				**parameters: Additional parameters to pass to the function or class.
+			Returns:
+				The result of the function execution or the initialized class.
+		"""
+		if script not in self.scripts:
+			raise ImportError(f"No such script found: {script}")
+		script_module = self.scripts[script]
 
-	def record(self, data):
+		if not hasattr(script_module, function):
+			raise AttributeError(f"No such function '{function}' in script {script}")
+		f = getattr(script_module, function)
 
-		schema = self.load_schema(Config().tables.bimcloud25.schema)
-		table_path = Config().storage + '/' + Config().tables.bimcloud25.name
+		if not callable(f):
+			raise TypeError(f"{function} is not callable in script {script}")
 
-		# Try to load the Delta table
-		try:
-		    existing_df = self.spark.read.format("delta").load(table_path)
-		except:
-		    # Initialize an empty DataFrame if the table doesn't exist
-		    existing_df = self.spark.createDataFrame([], schema[0])
+		parameters['config'] = self._load_config(filename=script, scope=f"scripts\\{script}")
+		return f(**parameters)
 
-		existing_df.createOrReplaceTempView("delta_table")
-
-		# Convert to DataFrame
-		new_data_df = self.spark.createDataFrame(
-		    [(uuid.uuid4().hex, datetime.datetime.now().isoformat(),  datetime.datetime.now().strftime("%Y-%m"), *record) for record in data],
-		    schema=schema[0]
-		)
-
-		# Detect Changes (Anti-Join)
-		key_columns = schema[1]
-		changed_data = new_data_df.join(
-		    existing_df,
-		    [new_data_df[c] == existing_df[c] for c in key_columns],
-		    "left_anti"
-		)
-
-		# Write Only Changed Data to Delta Table
-		if changed_data.count() > 0:
-		    changed_data.write.format("delta") \
-		        .partitionBy("file_id", "_ym") \
-		        .mode("append") \
-		        .save(table_path)
-
-		self.spark.stop()
 
 if __name__ == "__main__":
 
-	worker = Worker()
+	cmd = argparse.ArgumentParser()
+	cmd.add_argument('-s', '--script', required=True, help='Script name to run')
+	cmd.add_argument('-u', '--user', required=False, help='User name')
+	cmd.add_argument('-p', '--password', required=False, help='User password')
+	arg = cmd.parse_args()	
 
-	data = [
-	    ("df3ws3", "file1", "prj1", "project", 2345, "25.1", "active", 1734882835, 1734882835, 1734882835, 1734882835, 500, 5, 1 ),
-	    ("as34gv", "file2", "prj2", "project", 3120, "25.1", "active", 1734882835, 1734882835, 1734882835, 1734882835, 400, 3, 1 ),
-	    ("56h3sk", "file3", "prj1", "project", 2783, "25.1", "active", 1734882835, 1734882835, 1734882835, 1734882835, 700, 1, 0),
-	]
+	lake = LakeHouse()
+	result = lake.execute(**vars(arg))
 
-	worker.record(data)
+
+	# print(json.dumps(res, indent = 4))
+	print(result)
