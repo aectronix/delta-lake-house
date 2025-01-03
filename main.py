@@ -84,6 +84,6 @@ if __name__ == "__main__":
 	lake = LakeHouse()
 	result = lake.execute(**vars(arg))
 
-
-	# print(json.dumps(res, indent = 4))
-	print(result)
+	# print (datetime.now())
+	# print(json.dumps(result, indent = 4))
+	# print(result)

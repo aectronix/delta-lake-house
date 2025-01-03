@@ -1,5 +1,8 @@
 import json
+import os
 import requests
+
+from datetime import date, datetime, timedelta
 
 class BIMcloud():
 
@@ -33,19 +36,57 @@ class BIMcloud():
 		except json.JSONDecodeError:
 			raise ValueError("Failed to decode authentication response.")
 
-	def get_resources(self, criterion=None, options={}):
-		print (f"Retrieving projects...")
-		url = self.url + '/management/client/get-resources-by-criterion'
-		if not criterion:
-			criterion = {
-				'$or': [
+	def get_traceables(self):
+		path = os.path.dirname(os.path.abspath(__file__))
+		file_path = os.path.join(path, 'traceables.json')
+		if os.path.exists(file_path):
+			with open(file_path, 'r') as file:
+				return json.load(file)
+
+	def get_last_modified(self):
+		traceables = self.get_traceables() or {'updated': '2025-01-01 00:00:00', 'resources': {}}
+		from_date = datetime.strptime(traceables['updated'], '%Y-%m-%d %H:%M:%S')
+		from_time = from_date.timestamp() * 1000
+		criterion = {
+			'$and': [
+				{'$gte': {'$modifiedDate': from_time }},
+				{'$or': [
 					{'$eq': {'type': 'project'}},
 					{'$eq': {'type': 'library'}}
-				]
-			}
-		response = requests.post(url, headers={'Authorization': f"Bearer {self.auth['access_token']}"}, params={}, json={**criterion, **options})
+				]}
+			]
+		}
+		url = self.url + '/management/client/get-resources-by-criterion'
+		response = requests.post(url, headers={'Authorization': f"Bearer {self.auth['access_token']}"}, params={}, json={**criterion})
 		return response.json() if response.ok else None
-		
+	
+	def test(self, resources):
+		traceables = self.get_traceables() or {'updated': '2025-01-01 00:00:00', 'resources': {}}
+		updated = False
+		for res in resources:
+			# get only modified
+			if (
+				res['id'] not in resources
+				or res['$modifiedDate'] > traceables['updated'].timestamp() * 1000
+				or res['$modifiedDate'] > resources[res['id']]['$modifiedDate'].timestamp() * 1000
+			):
+				updated = True
+				friendlyDate = datetime.fromtimestamp(res['$modifiedDate'] / 1000)
+				traceables['resources'][res['id']] = {
+					'name': res['name'],
+					'$modifiedDate': res['$modifiedDate'],
+					'@friendlyDate': friendlyDate.strftime("%Y-%m-%d %H:%M:%S")
+				}
+				print (f"{res['id']}: \"{res['name']}\", {friendlyDate}")
+
+		if updated:
+			path = os.path.dirname(os.path.abspath(__file__))
+			file_path = os.path.join(path, 'resources.json')
+			traceables['updated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+			with open(file_path, 'w', encoding='utf-8') as file:
+				json.dump(traceables, file, ensure_ascii=False, indent=4)
+
+		# TODO: form a dataset with only updated ones
 
 def execute(**parameters):
 	
@@ -54,6 +95,7 @@ def execute(**parameters):
 		parameters.get('password'),
 		parameters.get('config'))
 
-	res = bim.get_resources()
+	res = bim.get_last_modified()
+	bim.test(res)
 
 	return res
